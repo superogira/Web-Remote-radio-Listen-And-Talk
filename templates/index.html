@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Radio PTT</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #2c3e50;
+            color: #ecf0f1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            touch-action: manipulation;
+        }
+        .container {
+            text-align: center;
+            background: #34495e;
+            padding: 20px 40px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+            max-width: 90%;
+        }
+        #ptt-button {
+            width: 180px;
+            height: 180px;
+            border-radius: 50%;
+            border: 5px solid #2980b9;
+            background-color: #3498db;
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent; /* ลบไฮไลท์ตอนแตะบนมือถือ */
+            padding: 10px;
+            line-height: 1.2;
+        }
+        /* --- Style สำหรับปุ่มเริ่มต้น --- */
+        #ptt-button.initialize {
+            background-color: #1abc9c;
+            border-color: #16a085;
+            animation: soft-pulse 2s infinite;
+        }
+        #ptt-button:hover:not(:disabled) {
+            transform: scale(1.05);
+        }
+        #ptt-button.transmitting {
+            background-color: #e74c3c;
+            border-color: #c0392b;
+            animation: pulse 1.5s infinite;
+        }
+        #ptt-button.receiving {
+            background-color: #f1c40f;
+            border-color: #f39c12;
+            cursor: not-allowed;
+        }
+        #ptt-button:disabled {
+            opacity: 0.7;
+        }
+        .volume-controls {
+            margin-top: 30px;
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 10px 20px;
+            align-items: center;
+        }
+        .volume-controls label { text-align: right; font-size: 16px; }
+        .volume-controls input[type="range"] { width: 100%; cursor: pointer; }
+        #status { margin-top: 20px; font-size: 18px; height: 25px; color: #bdc3c7; }
+        
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7); }
+            70% { box-shadow: 0 0 0 20px rgba(231, 76, 60, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0); }
+        }
+        @keyframes soft-pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Web Radio PTT</h1>
+        <div id="status">Connecting...</div>
+        <div id="ptt-button" class="initialize" role="button">กดเพื่อเริ่ม<br>ระบบเสียง</div>
+        <div class="volume-controls">
+            </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // ... (ประกาศตัวแปรเหมือนเดิม) ...
+            const socket = io();
+            const pttButton = document.getElementById('ptt-button');
+            const statusDiv = document.getElementById('status');
+			const micVolumeSlider = document.getElementById('mic-volume');
+			const speakerVolumeSlider = document.getElementById('speaker-volume');
+
+            let audioContext;
+			let mediaStream;
+			let scriptProcessor;
+            let isInitialized = false; // <-- ตัวแปรใหม่สำหรับเช็คการปลดล็อกเสียง
+            let isTransmitting = false;
+            let isReceiving = false;
+            let incomingAudioQueue = [];
+			let isPlaying = false;
+			
+			const MIC_SAMPLE_RATE = 22050;
+			const SERVER_SAMPLE_RATE = 16000;
+
+            // --- **การเปลี่ยนแปลงหลักอยู่ที่นี่** ---
+            pttButton.addEventListener('click', async () => {
+                // **ขั้นตอนที่ 1: การปลดล็อกเสียงในครั้งแรก**
+                if (!isInitialized) {
+                    try {
+                        console.log("Performing first-time audio initialization...");
+                        // สร้างและปลุก AudioContext ให้ทำงาน
+                        if (!audioContext) {
+                            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        }
+                        if (audioContext.state === 'suspended') {
+                            await audioContext.resume();
+                        }
+                        
+                        console.log("AudioContext is now running:", audioContext.state);
+                        isInitialized = true; // ตั้งค่าว่าปลดล็อกแล้ว
+                        
+                        // อัปเดต UI ให้พร้อมใช้งาน
+                        pttButton.classList.remove('initialize');
+                        pttButton.textContent = 'PTT';
+                        statusDiv.textContent = '✅ Audio Ready';
+                        
+                        // พยายามเล่นเสียงที่อาจจะค้างอยู่ในคิวทันที
+                        playQueue(); 
+
+                    } catch (err) {
+                        console.error("Failed to initialize AudioContext:", err);
+                        statusDiv.textContent = 'Error: Audio failed to start.';
+                        alert('ไม่สามารถเริ่มระบบเสียงได้ กรุณาตรวจสอบว่าเบราว์เซอร์ของคุณรองรับ Web Audio API');
+                    }
+                    return; // จบการทำงานสำหรับการคลิกครั้งแรก
+                }
+
+                // **ขั้นตอนที่ 2: การทำงานของ PTT ตามปกติ (หลังจากปลดล็อกแล้ว)**
+                if (isReceiving) return;
+
+                if (!isTransmitting) {
+                    startPtt();
+                } else {
+                    stopPtt();
+                }
+            });
+
+            // ฟังก์ชันอื่นๆ (startPtt, stopPtt, playQueue, etc.) เหมือนเดิมเกือบทั้งหมด
+            // แค่ต้องแน่ใจว่ามันใช้ audioContext ที่ถูกสร้างไว้แล้ว
+            
+            function playQueue() {
+                // ไม่ต้องทำอะไรเลยถ้ายังไม่ได้ปลดล็อกเสียง
+                if (!isInitialized || incomingAudioQueue.length === 0) {
+                    isPlaying = false;
+                    return;
+                }
+                isPlaying = true;
+                
+				if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({sampleRate: SERVER_SAMPLE_RATE});
+				if(audioContext.state === 'suspended') audioContext.resume();
+				const frameCount = incomingAudioQueue[0].length / 2;
+				const audioBuffer = audioContext.createBuffer(1, frameCount, SERVER_SAMPLE_RATE);
+				const bufferData = audioBuffer.getChannelData(0);
+				const dataView = new DataView(incomingAudioQueue.shift().buffer);
+				for (let i = 0; i < frameCount; i++) {
+					bufferData[i] = dataView.getInt16(i * 2, true) / 32768.0;
+				}
+				const source = audioContext.createBufferSource();
+				source.buffer = audioBuffer;
+				source.connect(audioContext.destination);
+				source.onended = playQueue;
+				source.start();
+            }
+
+            // ... โค้ดส่วนที่เหลือทั้งหมดของ JavaScript สามารถใช้ของเดิมได้เลย ...
+            // (socket.on, startPtt, stopPtt, volume controls, etc.)
+			socket.on('connect', () => {
+				statusDiv.textContent = '✅ Connected';
+				console.log('Connected to server');
+			});
+
+			socket.on('disconnect', () => {
+				statusDiv.textContent = '❌ Disconnected';
+				console.log('Disconnected from server');
+				if (isTransmitting) stopPtt();
+			});
+			
+			socket.on('radio_status', (data) => {
+				if (data.status === 'receiving') {
+					isReceiving = true;
+					pttButton.classList.add('receiving');
+					pttButton.textContent = 'RECEIVING';
+					pttButton.disabled = true;
+				} else {
+					isReceiving = false;
+					pttButton.classList.remove('receiving');
+					pttButton.textContent = 'PTT';
+					pttButton.disabled = false;
+				}
+			});
+
+			socket.on('audio_chunk_from_server', (chunk) => {
+				const audioData = new Uint8Array(chunk);
+				incomingAudioQueue.push(audioData);
+				if (!isPlaying) {
+					playQueue();
+				}
+			});
+			
+			async function startPtt() {
+				console.log("Debug: startPtt() called.");
+				if (isTransmitting || isReceiving) {
+					console.log("Debug: Aborting startPtt because already transmitting or receiving.");
+					return;
+				}
+				isTransmitting = true;
+
+				pttButton.classList.add('transmitting');
+				pttButton.textContent = 'TALK';
+				pttButton.setAttribute('aria-pressed', 'true');
+				statusDiv.textContent = '🎤 Transmitting...';
+
+				console.log("Debug: Emitting ptt_start to server.");
+				socket.emit('ptt_start');
+
+				try {
+					console.log("Debug: Step 1 - Creating AudioContext if needed.");
+					if (!audioContext) {
+						audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: MIC_SAMPLE_RATE });
+					}
+					if (audioContext.state === 'suspended') {
+						console.log("Debug: Step 2 - Resuming suspended AudioContext.");
+						await audioContext.resume();
+					}
+
+					console.log("Debug: Step 3 - Requesting microphone with getUserMedia.");
+					mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: MIC_SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+					
+					console.log("Debug: Step 4 - Microphone access granted. Creating audio nodes.");
+					const source = audioContext.createMediaStreamSource(mediaStream);
+					scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+					
+					scriptProcessor.onaudioprocess = (event) => {
+						const inputData = event.inputBuffer.getChannelData(0);
+						const int16Array = new Int16Array(inputData.length);
+						for (let i = 0; i < inputData.length; i++) {
+							int16Array[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+						}
+						if (socket.connected && isTransmitting) {
+							socket.emit('audio_chunk_to_server', int16Array.buffer);
+						}
+					};
+
+					source.connect(scriptProcessor);
+					scriptProcessor.connect(audioContext.destination);
+					audioContext.destination.volume = 0;
+					console.log("Debug: Step 5 - PTT start process completed successfully.");
+
+				} catch (err) {
+					console.error("!!! DEBUG: CRITICAL ERROR IN startPtt() !!!", err);
+					statusDiv.textContent = 'Error: ' + err.name;
+					stopPtt();
+				}
+			}
+
+			function stopPtt() {
+				console.log("Debug: stopPtt() called.");
+				if (!isTransmitting) return;
+
+				if (scriptProcessor) {
+					scriptProcessor.disconnect();
+					scriptProcessor = null;
+				}
+				if (mediaStream) {
+					mediaStream.getTracks().forEach(track => track.stop());
+					mediaStream = null;
+				}
+				if (audioContext && audioContext.destination) {
+					audioContext.destination.volume = 1;
+				}
+
+				console.log("Debug: Emitting ptt_stop to server.");
+				socket.emit('ptt_stop');
+				
+				isTransmitting = false;
+				pttButton.classList.remove('transmitting');
+				pttButton.textContent = 'PTT';
+				pttButton.setAttribute('aria-pressed', 'false');
+				statusDiv.textContent = '✅ Connected';
+			}
+
+			pttButton.addEventListener('click', () => {
+				console.log("Debug: PTT button clicked. isTransmitting =", isTransmitting);
+				if (isReceiving) return;
+
+				if (!isTransmitting) {
+					startPtt();
+				} else {
+					stopPtt();
+				}
+			});
+
+			micVolumeSlider.addEventListener('input', () => {
+				socket.emit('control_volume', { control: "'Mic'", value: micVolumeSlider.value + '%' });
+			});
+
+			speakerVolumeSlider.addEventListener('input', () => {
+				socket.emit('control_volume', { control: "'Speaker'", value: speakerVolumeSlider.value + '%' });
+			});			
+        });
+    </script>
+</body>
+</html>
