@@ -1,4 +1,4 @@
-/* 222 */
+/* 333 */
 <!DOCTYPE html>
 <html lang="th">
 <head>
@@ -108,52 +108,44 @@
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
     document.addEventListener('DOMContentLoaded', () => {
+        // ... ส่วนประกาศตัวแปรเหมือนเดิม ...
         const socket = io();
         const pttButton = document.getElementById('ptt-button');
         const statusDiv = document.getElementById('status');
-        const micVolumeSlider = document.getElementById('mic-volume');
-        const speakerVolumeSlider = document.getElementById('speaker-volume');
 
         let audioContext;
-        let mediaStream;
-        let scriptProcessor;
-        let isTransmitting = false;
-        let isReceiving = false;
         let isInitialized = false;
-        let isBusy = false; // <-- [ใหม่] เพิ่มตัวแปร Busy Flag
+        let isBusy = false; 
+        
+        // PTT-specific variables
+        let pttMediaStream;
+        let pttScriptProcessor;
+        let isTransmitting = false;
+
+        let isReceiving = false;
         let incomingAudioQueue = [];
         let isPlaying = false;
-        
-        // [แก้ไข] ตั้งค่า Sample Rate ที่เป็นมาตรฐาน
-	const MIC_SAMPLE_RATE = 48000;
-	const SERVER_SAMPLE_RATE = 48000; // ให้ตรงกับฝั่ง Server
-	    
-        // --- Event Listener หลัก (แก้ไขใหม่) ---
+
+        const SERVER_SAMPLE_RATE = 48000;
+
+        // --- Event Listener หลัก ---
         pttButton.addEventListener('click', async () => {
-            // ป้องกันการคลิกซ้ำซ้อน
             if (isBusy || isReceiving) {
                 console.log("Debug: Button is busy or receiving, click ignored.");
                 return;
             }
-
-            // ตั้งค่าสถานะว่ากำลังยุ่ง
             isBusy = true;
-            pttButton.disabled = true; // ปิดการใช้งานปุ่มชั่วคราว
+            pttButton.disabled = true;
 
-            // 1. จัดการการเริ่มต้นครั้งแรก
             if (!isInitialized) {
                 await initializeAudio();
-            } 
-            // 2. จัดการการกด PTT
-            else if (!isTransmitting) {
+            } else if (!isTransmitting) {
                 await startPtt();
             } else {
-                stopPtt(); // stopPtt เป็น synchronous ไม่ต้อง await
+                stopPtt();
             }
             
-            // ปลดล็อกเมื่อทุกอย่างเสร็จสิ้น
             isBusy = false;
-            // เปิดให้ปุ่มทำงานได้อีกครั้ง ถ้าไม่ได้กำลังส่งหรือรับสัญญาณ
             if (!isTransmitting && !isReceiving) {
                 pttButton.disabled = false;
             }
@@ -181,29 +173,24 @@
 
         async function startPtt() {
             console.log("Debug: startPtt() called.");
-            
             pttButton.classList.add('transmitting');
             pttButton.textContent = 'TALK';
-            pttButton.setAttribute('aria-pressed', 'true');
-            statusDiv.textContent = '🎤 Transmitting...';
             
             try {
                 socket.emit('ptt_start');
                 
-                // AudioContext ควรจะพร้อมแล้วจากการ init ครั้งแรก
-                if (audioContext.state === 'suspended') { await audioContext.resume(); }
-
-                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+                // ขออนุญาตใช้ไมโครโฟน
+                pttMediaStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
                 
-		// [แก้ไข] สร้าง AudioContext ใหม่สำหรับไมโครโฟน เพื่อให้ได้ Sample Rate ที่ถูกต้อง
-		// เราไม่สามารถเปลี่ยน sampleRate ของ audioContext เดิมที่ใช้เล่นเสียงได้
-		const micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: mediaStream.getAudioTracks()[0].getSettings().sampleRate });
-		const source = micAudioContext.createMediaStreamSource(mediaStream);
-		const bufferSize = 4096;
-		scriptProcessor = micAudioContext.createScriptProcessor(bufferSize, 1, 1);
+                // สร้าง AudioContext ใหม่สำหรับไมโครโฟนโดยเฉพาะ
+                const micAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = micAudioContext.createMediaStreamSource(pttMediaStream);
+                const bufferSize = 4096;
+                pttScriptProcessor = micAudioContext.createScriptProcessor(bufferSize, 1, 1);
                 
-                scriptProcessor.onaudioprocess = (event) => {
+                pttScriptProcessor.onaudioprocess = (event) => {
                     const inputData = event.inputBuffer.getChannelData(0);
+                    // ไม่มีการ Resample ในตัวอย่างนี้ แต่ถ้าจำเป็น สามารถทำได้ที่นี่
                     const int16Array = new Int16Array(inputData.length);
                     for (let i = 0; i < inputData.length; i++) {
                         int16Array[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
@@ -212,31 +199,35 @@
                         socket.emit('audio_chunk_to_server', int16Array.buffer);
                     }
                 };
-                source.connect(scriptProcessor);
-                scriptProcessor.connect(audioContext.destination);
+
+                source.connect(pttScriptProcessor);
+                // [การแก้ไขที่ 1] ต่อ ScriptProcessor เข้ากับ destination ของ "ตัวเอง"
+                pttScriptProcessor.connect(micAudioContext.destination);
                 
-                isTransmitting = true; // <-- [สำคัญ] ตั้งค่าสถานะหลังจากทุกอย่างพร้อมแล้ว
-                pttButton.disabled = false; // เปิดปุ่มให้กด Stop ได้
+                // [การแก้ไขที่ 2] ปิดเสียงของ context นี้ เพื่อไม่ให้ผู้ใช้ได้ยินเสียงตัวเอง
+                micAudioContext.destination.volume = 0;
+
+                isTransmitting = true;
+                pttButton.disabled = false;
 
             } catch (err) {
                 console.error('Error starting PTT:', err);
-		alert('ไม่สามารถเปิดไมโครโฟนได้: ' + err.message);
-		statusDiv.textContent = 'Error: No microphone access!';
+                alert('ไม่สามารถเปิดไมโครโฟนได้: ' + err.message + '\n\nกรุณาตรวจสอบการตั้งค่า Permission ของไมโครโฟนในเบราว์เซอร์');
                 statusDiv.textContent = 'Error: No microphone access!';
-                stopPtt(); // เรียก stopPtt เพื่อ cleanup และรีเซ็ตสถานะ
+                stopPtt(); 
             }
         }
 
         function stopPtt() {
             console.log("Debug: stopPtt() called.");
             
-            if (scriptProcessor) {
-                scriptProcessor.disconnect();
-                scriptProcessor = null;
+            if (pttScriptProcessor) {
+                pttScriptProcessor.disconnect();
+                pttScriptProcessor = null;
             }
-            if (mediaStream) {
-                mediaStream.getTracks().forEach(track => track.stop());
-                mediaStream = null;
+            if (pttMediaStream) {
+                pttMediaStream.getTracks().forEach(track => track.stop());
+                pttMediaStream = null;
             }
 
             socket.emit('ptt_stop');
@@ -244,13 +235,11 @@
             isTransmitting = false;
             pttButton.classList.remove('transmitting');
             pttButton.textContent = 'PTT';
-            pttButton.setAttribute('aria-pressed', 'false');
             statusDiv.textContent = '✅ Audio Ready';
-            pttButton.disabled = false; // เปิดปุ่มให้พร้อมใช้งาน
+            pttButton.disabled = false;
         }
         
         // --- ส่วน Socket.IO event listeners และ playQueue เหมือนเดิม ---
-        // ... (socket.on('connect'), socket.on('disconnect'), etc.) ...
         socket.on('connect', () => { statusDiv.textContent = '✅ Connected'; console.log('Connected to server'); });
         socket.on('disconnect', () => { statusDiv.textContent = '❌ Disconnected'; console.log('Disconnected from server'); if(isTransmitting) stopPtt(); });
         socket.on('radio_status', (data) => {
@@ -259,7 +248,7 @@
                 pttButton.classList.add('receiving');
                 pttButton.textContent = 'RECEIVING';
                 pttButton.disabled = true;
-            } else { // 'idle'
+            } else {
                 isReceiving = false;
                 pttButton.classList.remove('receiving');
                 pttButton.textContent = 'PTT';
@@ -275,7 +264,7 @@
             }
         });
         function playQueue() {
-            if (incomingAudioQueue.length === 0) { isPlaying = false; return; }
+            if (!audioContext || incomingAudioQueue.length === 0) { isPlaying = false; return; }
             isPlaying = true;
             const frameCount = incomingAudioQueue[0].length / 2;
             const audioBuffer = audioContext.createBuffer(1, frameCount, SERVER_SAMPLE_RATE);
