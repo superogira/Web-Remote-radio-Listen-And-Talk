@@ -101,184 +101,183 @@
     </div>
 
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const socket = io();
-            const pttButton = document.getElementById('ptt-button');
-            const statusDiv = document.getElementById('status');
-            const micVolumeSlider = document.getElementById('mic-volume');
-            const speakerVolumeSlider = document.getElementById('speaker-volume');
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const socket = io();
+        const pttButton = document.getElementById('ptt-button');
+        const statusDiv = document.getElementById('status');
+        const micVolumeSlider = document.getElementById('mic-volume');
+        const speakerVolumeSlider = document.getElementById('speaker-volume');
 
-            let audioContext;
-            let mediaStream;
-            let scriptProcessor;
-            let isTransmitting = false;
-            let isReceiving = false;
-            let incomingAudioQueue = [];
-            let isPlaying = false;
-            
-            const MIC_SAMPLE_RATE = 22050;
-            const SERVER_SAMPLE_RATE = 16000;
+        // ... (ส่วน style ไม่ต้องแก้) ...
 
-            // --- Socket.IO Event Handlers ---
-            socket.on('connect', () => {
-                statusDiv.textContent = '✅ Connected';
-                console.log('Connected to server');
-            });
+        let audioContext;
+        let mediaStream;
+        let scriptProcessor;
+        let isTransmitting = false;
+        let isReceiving = false;
+        let incomingAudioQueue = [];
+        let isPlaying = false;
+        
+        const MIC_SAMPLE_RATE = 22050;
+        const SERVER_SAMPLE_RATE = 16000;
 
-            socket.on('disconnect', () => {
-                statusDiv.textContent = '❌ Disconnected';
-                console.log('Disconnected from server');
-                if (isTransmitting) stopPtt();
-            });
-            
-            socket.on('radio_status', (data) => {
-                if (data.status === 'receiving') {
-                    isReceiving = true;
-                    pttButton.classList.add('receiving');
-                    pttButton.textContent = 'RECEIVING';
-                    pttButton.disabled = true;
-                } else { // 'idle'
-                    isReceiving = false;
-                    pttButton.classList.remove('receiving');
-                    pttButton.textContent = 'PTT';
-                    pttButton.disabled = false;
-                }
-            });
-
-            socket.on('audio_chunk_from_server', (chunk) => {
-                const audioData = new Uint8Array(chunk);
-                incomingAudioQueue.push(audioData);
-                if (!isPlaying) {
-                    playQueue();
-                }
-            });
-            
-            function playQueue() {
-                if (incomingAudioQueue.length === 0) {
-                    isPlaying = false;
-                    return;
-                }
-                isPlaying = true;
-
-                if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)({sampleRate: SERVER_SAMPLE_RATE});
-                }
-                 // ถ้า AudioContext ถูกพักไว้ ให้ปลุกมันขึ้นมาทำงานก่อน
-                if(audioContext.state === 'suspended') {
-                    audioContext.resume();
-                }
-
-                const frameCount = incomingAudioQueue[0].length / 2;
-                const audioBuffer = audioContext.createBuffer(1, frameCount, SERVER_SAMPLE_RATE);
-                const bufferData = audioBuffer.getChannelData(0);
-
-                const dataView = new DataView(incomingAudioQueue.shift().buffer);
-                for (let i = 0; i < frameCount; i++) {
-                    bufferData[i] = dataView.getInt16(i * 2, true) / 32768.0;
-                }
-                
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-                source.onended = playQueue;
-                source.start();
-            }
-
-            // --- PTT Logic ---
-            async function startPtt() {
-                if (isTransmitting || isReceiving) return;
-                isTransmitting = true;
-
-                pttButton.classList.add('transmitting');
-                pttButton.textContent = 'TALK';
-                pttButton.setAttribute('aria-pressed', 'true');
-                statusDiv.textContent = '🎤 Transmitting...';
-
-                socket.emit('ptt_start');
-
-                try {
-                    // สร้าง AudioContext หากยังไม่มี
-                    if (!audioContext) {
-                        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: MIC_SAMPLE_RATE });
-                    }
-                     // ปลุก AudioContext ให้ทำงาน
-                    if (audioContext.state === 'suspended') {
-                        await audioContext.resume();
-                    }
-
-                    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: MIC_SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-                    
-                    const source = audioContext.createMediaStreamSource(mediaStream);
-                    scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-                    
-                    scriptProcessor.onaudioprocess = (event) => {
-                        const inputData = event.inputBuffer.getChannelData(0);
-                        const int16Array = new Int16Array(inputData.length);
-                        for (let i = 0; i < inputData.length; i++) {
-                            int16Array[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
-                        }
-                        if (socket.connected && isTransmitting) {
-                            socket.emit('audio_chunk_to_server', int16Array.buffer);
-                        }
-                    };
-
-                    source.connect(scriptProcessor);
-                    scriptProcessor.connect(audioContext.destination);
-                    audioContext.destination.volume = 0;
-
-                } catch (err) {
-                    console.error('Error accessing microphone:', err);
-                    statusDiv.textContent = 'Error: No microphone access!';
-                    stopPtt(); // หยุดการทำงานถ้ามีปัญหา
-                }
-            }
-
-            function stopPtt() {
-                if (!isTransmitting) return;
-
-                if (scriptProcessor) {
-                    scriptProcessor.disconnect();
-                    scriptProcessor = null;
-                }
-                if (mediaStream) {
-                    mediaStream.getTracks().forEach(track => track.stop());
-                    mediaStream = null;
-                }
-                if (audioContext && audioContext.destination) {
-                    audioContext.destination.volume = 1; // คืนค่าเสียงกลับเป็นปกติ
-                }
-
-                socket.emit('ptt_stop');
-                
-                isTransmitting = false;
-                pttButton.classList.remove('transmitting');
-                pttButton.textContent = 'PTT';
-                pttButton.setAttribute('aria-pressed', 'false');
-                statusDiv.textContent = '✅ Connected';
-            }
-
-            // --- **การเปลี่ยนแปลงที่สำคัญอยู่ที่นี่** ---
-            // เปลี่ยนมาใช้ 'click' event เพื่อทำ Toggle
-            pttButton.addEventListener('click', () => {
-                if (isReceiving) return; // ถ้ากำลังรับสัญญาณอยู่ กดไม่ได้
-
-                if (!isTransmitting) {
-                    startPtt();
-                } else {
-                    stopPtt();
-                }
-            });
-
-            // --- Volume Control Logic ---
-            micVolumeSlider.addEventListener('input', () => {
-                socket.emit('control_volume', { control: "'Mic'", value: micVolumeSlider.value + '%' });
-            });
-
-            speakerVolumeSlider.addEventListener('input', () => {
-                socket.emit('control_volume', { control: "'Speaker'", value: speakerVolumeSlider.value + '%' });
-            });
+        socket.on('connect', () => {
+            statusDiv.textContent = '✅ Connected';
+            console.log('Connected to server');
         });
-    </script>
+
+        socket.on('disconnect', () => {
+            statusDiv.textContent = '❌ Disconnected';
+            console.log('Disconnected from server');
+            if (isTransmitting) stopPtt();
+        });
+        
+        socket.on('radio_status', (data) => {
+            if (data.status === 'receiving') {
+                isReceiving = true;
+                pttButton.classList.add('receiving');
+                pttButton.textContent = 'RECEIVING';
+                pttButton.disabled = true;
+            } else {
+                isReceiving = false;
+                pttButton.classList.remove('receiving');
+                pttButton.textContent = 'PTT';
+                pttButton.disabled = false;
+            }
+        });
+
+        socket.on('audio_chunk_from_server', (chunk) => {
+            const audioData = new Uint8Array(chunk);
+            incomingAudioQueue.push(audioData);
+            if (!isPlaying) {
+                playQueue();
+            }
+        });
+        
+        function playQueue() {
+            if (incomingAudioQueue.length === 0) {
+                isPlaying = false;
+                return;
+            }
+            isPlaying = true;
+            if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({sampleRate: SERVER_SAMPLE_RATE});
+            if(audioContext.state === 'suspended') audioContext.resume();
+            const frameCount = incomingAudioQueue[0].length / 2;
+            const audioBuffer = audioContext.createBuffer(1, frameCount, SERVER_SAMPLE_RATE);
+            const bufferData = audioBuffer.getChannelData(0);
+            const dataView = new DataView(incomingAudioQueue.shift().buffer);
+            for (let i = 0; i < frameCount; i++) {
+                bufferData[i] = dataView.getInt16(i * 2, true) / 32768.0;
+            }
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.onended = playQueue;
+            source.start();
+        }
+
+        async function startPtt() {
+            console.log("Debug: startPtt() called.");
+            if (isTransmitting || isReceiving) {
+                console.log("Debug: Aborting startPtt because already transmitting or receiving.");
+                return;
+            }
+            isTransmitting = true;
+
+            pttButton.classList.add('transmitting');
+            pttButton.textContent = 'TALK';
+            pttButton.setAttribute('aria-pressed', 'true');
+            statusDiv.textContent = '🎤 Transmitting...';
+
+            console.log("Debug: Emitting ptt_start to server.");
+            socket.emit('ptt_start');
+
+            try {
+                console.log("Debug: Step 1 - Creating AudioContext if needed.");
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: MIC_SAMPLE_RATE });
+                }
+                if (audioContext.state === 'suspended') {
+                    console.log("Debug: Step 2 - Resuming suspended AudioContext.");
+                    await audioContext.resume();
+                }
+
+                console.log("Debug: Step 3 - Requesting microphone with getUserMedia.");
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: MIC_SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+                
+                console.log("Debug: Step 4 - Microphone access granted. Creating audio nodes.");
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                scriptProcessor.onaudioprocess = (event) => {
+                    const inputData = event.inputBuffer.getChannelData(0);
+                    const int16Array = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        int16Array[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+                    }
+                    if (socket.connected && isTransmitting) {
+                        socket.emit('audio_chunk_to_server', int16Array.buffer);
+                    }
+                };
+
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(audioContext.destination);
+                audioContext.destination.volume = 0;
+                console.log("Debug: Step 5 - PTT start process completed successfully.");
+
+            } catch (err) {
+                console.error("!!! DEBUG: CRITICAL ERROR IN startPtt() !!!", err);
+                statusDiv.textContent = 'Error: ' + err.name;
+                stopPtt();
+            }
+        }
+
+        function stopPtt() {
+            console.log("Debug: stopPtt() called.");
+            if (!isTransmitting) return;
+
+            if (scriptProcessor) {
+                scriptProcessor.disconnect();
+                scriptProcessor = null;
+            }
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            if (audioContext && audioContext.destination) {
+                audioContext.destination.volume = 1;
+            }
+
+            console.log("Debug: Emitting ptt_stop to server.");
+            socket.emit('ptt_stop');
+            
+            isTransmitting = false;
+            pttButton.classList.remove('transmitting');
+            pttButton.textContent = 'PTT';
+            pttButton.setAttribute('aria-pressed', 'false');
+            statusDiv.textContent = '✅ Connected';
+        }
+
+        pttButton.addEventListener('click', () => {
+            console.log("Debug: PTT button clicked. isTransmitting =", isTransmitting);
+            if (isReceiving) return;
+
+            if (!isTransmitting) {
+                startPtt();
+            } else {
+                stopPtt();
+            }
+        });
+
+        micVolumeSlider.addEventListener('input', () => {
+            socket.emit('control_volume', { control: "'Mic'", value: micVolumeSlider.value + '%' });
+        });
+
+        speakerVolumeSlider.addEventListener('input', () => {
+            socket.emit('control_volume', { control: "'Speaker'", value: speakerVolumeSlider.value + '%' });
+        });
+    });
+</script>
 </body>
 </html>
