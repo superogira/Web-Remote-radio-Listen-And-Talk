@@ -15,7 +15,7 @@
             align-items: center;
             height: 100vh;
             margin: 0;
-            touch-action: manipulation;
+            touch-action: manipulation; /* ป้องกันการซูมเมื่อแตะรัวๆ บนมือถือ */
         }
         .container {
             text-align: center;
@@ -39,7 +39,7 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            user-select: none;
+            user-select: none; /* ป้องกันการเลือกข้อความบนปุ่ม */
             -webkit-tap-highlight-color: transparent; /* ลบไฮไลท์ตอนแตะบนมือถือ */
             padding: 10px;
             line-height: 1.2;
@@ -117,9 +117,16 @@
             let incomingAudioQueue = [];
 			let isPlaying = false;
 			
-			const MIC_SAMPLE_RATE = 22050;
-			const SERVER_SAMPLE_RATE = 16000;
+			const MIC_SAMPLE_RATE = 22050; // ต้องตรงกับ aplay ใน python
+			const SERVER_SAMPLE_RATE = 16000; // ต้องตรงกับ arecord ใน python
 
+            // ใช้ mousedown/mouseup สำหรับคอม หรือ touchstart/touchend สำหรับมือถือ
+            //pttButton.addEventListener('mousedown', startPtt);
+            //pttButton.addEventListener('mouseup', stopPtt);
+            //pttButton.addEventListener('mouseleave', stopPtt); // กรณีลากเมาส์ออก
+            //pttButton.addEventListener('touchstart', (e) => { e.preventDefault(); startPtt(); });
+            //pttButton.addEventListener('touchend', (e) => { e.preventDefault(); stopPtt(); });
+			
             // --- **การเปลี่ยนแปลงหลักอยู่ที่นี่** ---
             pttButton.addEventListener('click', async () => {
                 // **ขั้นตอนที่ 1: การปลดล็อกเสียงในครั้งแรก**
@@ -179,6 +186,8 @@
 				const frameCount = incomingAudioQueue[0].length / 2;
 				const audioBuffer = audioContext.createBuffer(1, frameCount, SERVER_SAMPLE_RATE);
 				const bufferData = audioBuffer.getChannelData(0);
+				
+				// แปลง Uint8Array (bytes) กลับเป็น Float32Array (-1.0 to 1.0)
 				const dataView = new DataView(incomingAudioQueue.shift().buffer);
 				for (let i = 0; i < frameCount; i++) {
 					bufferData[i] = dataView.getInt16(i * 2, true) / 32768.0;
@@ -186,7 +195,7 @@
 				const source = audioContext.createBufferSource();
 				source.buffer = audioBuffer;
 				source.connect(audioContext.destination);
-				source.onended = playQueue;
+				source.onended = playQueue; // เล่นชิ้นต่อไปเมื่อชิ้นนี้จบ
 				source.start();
             }
 
@@ -218,6 +227,7 @@
 			});
 
 			socket.on('audio_chunk_from_server', (chunk) => {
+				// ใช้ Web Audio API เล่นเสียงที่ได้รับจากวิทยุ
 				const audioData = new Uint8Array(chunk);
 				incomingAudioQueue.push(audioData);
 				if (!isPlaying) {
@@ -225,6 +235,7 @@
 				}
 			});
 			
+			// --- PTT Logic ---
 			async function startPtt() {
 				console.log("Debug: startPtt() called.");
 				if (isTransmitting || isReceiving) {
@@ -244,6 +255,7 @@
 				try {
 					console.log("Debug: Step 1 - Creating AudioContext if needed.");
 					if (!audioContext) {
+						// สร้าง AudioContext เมื่อมีการใช้งานครั้งแรก (จำเป็นต้องเกิดจาก user interaction)
 						audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: MIC_SAMPLE_RATE });
 					}
 					if (audioContext.state === 'suspended') {
@@ -260,6 +272,7 @@
 					
 					scriptProcessor.onaudioprocess = (event) => {
 						const inputData = event.inputBuffer.getChannelData(0);
+						// แปลง Float32Array เป็น Int16Array แล้วส่งเป็น binary
 						const int16Array = new Int16Array(inputData.length);
 						for (let i = 0; i < inputData.length; i++) {
 							int16Array[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
@@ -270,7 +283,8 @@
 					};
 
 					source.connect(scriptProcessor);
-					scriptProcessor.connect(audioContext.destination);
+					scriptProcessor.connect(audioContext.destination); // ต้อง connect ถึงจะทำงาน
+					// ปิดเสียงของตัวเองเพื่อไม่ให้ได้ยินเสียงตัวเองสะท้อน
 					audioContext.destination.volume = 0;
 					console.log("Debug: Step 5 - PTT start process completed successfully.");
 
@@ -293,6 +307,7 @@
 					mediaStream.getTracks().forEach(track => track.stop());
 					mediaStream = null;
 				}
+				// Reset volume to normal
 				if (audioContext && audioContext.destination) {
 					audioContext.destination.volume = 1;
 				}
@@ -317,7 +332,8 @@
 					stopPtt();
 				}
 			});
-
+			
+			// --- Volume Control Logic ---
 			micVolumeSlider.addEventListener('input', () => {
 				socket.emit('control_volume', { control: "'Mic'", value: micVolumeSlider.value + '%' });
 			});
