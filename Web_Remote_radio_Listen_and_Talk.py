@@ -7,7 +7,7 @@ from flask_socketio import SocketIO, emit
 
 # --- Configuration ---
 # !!! สำคัญมาก: เปลี่ยนค่านี้ให้ตรงกับ USB Sound Card ของคุณที่ได้จากคำสั่ง aplay -l !!!
-USB_SOUND_CARD = 'hw:1,0'
+USB_SOUND_CARD = 'plughw:1,0'
 # !!! สำคัญมาก: ปรับค่าความดังขั้นต่ำเพื่อเริ่มส่งเสียง (VOX Threshold) !!!
 # คุณอาจจะต้องลองปรับค่านี้ให้เหมาะสมกับสัญญาณรบกวนของวิทยุคุณ
 VOX_THRESHOLD = 500  # ลองเริ่มจากค่านี้น้อยๆ ก่อน เช่น 100 แล้วค่อยๆ เพิ่ม
@@ -20,7 +20,7 @@ socketio = SocketIO(app)
 # ตัวแปรสำหรับจัดการ Process การส่งและรับเสียง
 ptt_process = None
 is_transmitting = False
-
+ptt_lock = threading.Lock()
 
 # --- ALSA Volume Control ---
 def set_alsa_volume(control_name, value):
@@ -70,7 +70,9 @@ def handle_volume(data):
 def handle_ptt_start():
     """เริ่มกระบวนการส่งเสียง (PTT) จาก Client"""
     global ptt_process, is_transmitting
-    if not is_transmitting:
+    with ptt_lock:  # <-- ใช้ Lock
+        if is_transmitting:
+            return
         is_transmitting = True
         # หยุดการฟังเสียงจากวิทยุชั่วคราว
         stop_radio_listen_thread()
@@ -86,38 +88,50 @@ def handle_ptt_start():
 @socketio.on('audio_chunk_to_server')
 def handle_audio_chunk(chunk):
     """รับชิ้นส่วนเสียงจาก Client แล้วส่งไปที่ aplay"""
-    global ptt_process
+    # ไม่จำเป็นต้องใช้ Lock ที่นี่ เพราะเราอยากให้มันส่งข้อมูลได้เร็ว
     if ptt_process and ptt_process.stdin:
         try:
             ptt_process.stdin.write(chunk)
-        except (BrokenPipeError, IOError):
-            print("Pipe to aplay is broken. Client might have stopped PTT.")
-            stop_ptt()
+        except (BrokenPipeError, IOError, ValueError):  # <-- ดักจับ ValueError ด้วย
+            print("Pipe to aplay is broken or closed. Stopping PTT.")
+            # เรียกใช้ stop_ptt() แค่ครั้งเดียวก็พอ
+            if is_transmitting:
+                stop_ptt()
 
 
 @socketio.on('ptt_stop')
 def handle_ptt_stop():
     """หยุดกระบวนการส่งเสียง (PTT)"""
-    global is_transmitting
-    if is_transmitting:
-        print("PTT stopped by client.")
-        stop_ptt()
-        is_transmitting = False
-        # กลับมาเริ่มฟังเสียงจากวิทยุใหม่
-        start_radio_listen_thread()
+    # is_transmitting ถูกเช็คใน stop_ptt() แล้ว
+    stop_ptt()
 
 
 def stop_ptt():
-    """ฟังก์ชันสำหรับหยุด aplay process"""
-    global ptt_process
-    if ptt_process:
-        if ptt_process.stdin:
-            ptt_process.stdin.close()
-        if ptt_process.poll() is None:
-            ptt_process.terminate()
-            ptt_process.wait()
-        ptt_process = None
-        print("aplay process stopped.")
+    """ฟังก์ชันสำหรับหยุด aplay process (ทำให้ปลอดภัยขึ้น)"""
+    global ptt_process, is_transmitting
+    with ptt_lock:  # <-- ใช้ Lock เพื่อป้องกันการทำงานซ้ำซ้อน
+        if not is_transmitting:
+            return  # ถ้าไม่ได้ส่งอยู่ ก็ไม่ต้องทำอะไร
+
+        print("PTT stopped by client or error.")
+        is_transmitting = False  # <-- ย้าย is_transmitting มาไว้ใน Lock
+
+        if ptt_process:
+            if ptt_process.stdin:
+                try:
+                    ptt_process.stdin.close()
+                except (BrokenPipeError, IOError):
+                    pass  # ไม่ต้องทำอะไรถ้าท่อปิดไปแล้ว
+            if ptt_process.poll() is None:
+                ptt_process.terminate()
+                ptt_process.wait()
+            ptt_process = None
+            print("aplay process stopped.")
+
+        # กลับมาเริ่มฟังเสียงจากวิทยุใหม่
+        # การเรียก start_radio_listen_thread() อาจไม่จำเป็นต้องอยู่ใน lock
+        # แต่เพื่อความง่าย เอาไว้ตรงนี้ก่อน
+        start_radio_listen_thread()
 
 
 # --- Radio Listening Thread ---
