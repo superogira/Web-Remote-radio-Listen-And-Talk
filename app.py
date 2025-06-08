@@ -1,4 +1,4 @@
-# --- ขั้นตอนที่สำคัญที่สุด: Monkey Patch ต้องอยู่บนสุด ---
+# --- ขั้นตอนที่สำคัญที่สุด: Monkey Patch ต้องอยู่บนสุด --- 2
 import eventlet
 eventlet.monkey_patch()
 
@@ -12,7 +12,7 @@ from flask_socketio import SocketIO, emit
 
 # --- Configuration ---
 USB_SOUND_CARD = 'plughw:1,0'
-VOX_THRESHOLD = 1000
+VOX_THRESHOLD = 500
 CAPTURE_RATE = "16000"  # ค่าที่เหมาะสมสำหรับ Pi Zero 2 W
 CAPTURE_FORMAT = "S16_LE"
 
@@ -117,34 +117,34 @@ def radio_listen():
     is_receiving = False
     
     while not stop_thread.is_set():
-        # การอ่านข้อมูลจาก pipe ของ subprocess เป็น blocking I/O
-        # แต่ monkey_patch() จะช่วยทำให้มันทำงานร่วมกับ eventlet ได้
         audio_chunk = process.stdout.read(1024)
         if not audio_chunk:
             print("arecord process stream ended.")
             break
 
-        # VOX Logic (เหมือนเดิม)
+        # VOX Logic
         try:
             samples = [int.from_bytes(audio_chunk[i:i+2], 'little', signed=True) for i in range(0, len(audio_chunk), 2)]
             rms = (sum(s**2 for s in samples) / len(samples))**0.5
         except (ValueError, ZeroDivisionError):
             rms = 0
 
+        # --- ส่วนของ Logic ที่แก้ไขใหม่ทั้งหมด ---
         if rms > VOX_THRESHOLD:
+            # ถ้าสถานะเดิมคือยังไม่ได้รับเสียง ให้เปลี่ยนสถานะและแจ้ง Client
             if not is_receiving:
                 is_receiving = True
                 socketio.emit('radio_status', {'status': 'receiving'})
+            
+            # ส่งข้อมูลเสียงไปที่ Client เฉพาะเมื่อเสียงดังเกินเกณฑ์เท่านั้น
             socketio.emit('audio_chunk_from_server', audio_chunk)
+
         elif is_receiving:
+            # ถ้าเสียงเงียบลง และสถานะก่อนหน้าคือ "กำลังรับเสียง"
+            # ให้เปลี่ยนสถานะกลับเป็น idle และแจ้ง Client เพียงครั้งเดียว
             is_receiving = False
             socketio.emit('radio_status', {'status': 'idle'})
-
-        # เมื่อมีเสียงเข้ามา
-        if not is_receiving:
-            is_receiving = True
-            socketio.emit('radio_status', {'status': 'receiving'})
-        socketio.emit('audio_chunk_from_server', audio_chunk)
+        # --- จบส่วนที่แก้ไข ---
 
     # Cleanup
     if process.poll() is None:
