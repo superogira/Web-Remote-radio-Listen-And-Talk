@@ -124,9 +124,10 @@
         let incomingAudioQueue = [];
         let isPlaying = false;
         
-        const MIC_SAMPLE_RATE = 16000;
-        const SERVER_SAMPLE_RATE = 16000;
-
+        // [แก้ไข] ตั้งค่า Sample Rate ที่เป็นมาตรฐาน
+	const MIC_SAMPLE_RATE = 48000;
+	const SERVER_SAMPLE_RATE = 48000; // ให้ตรงกับฝั่ง Server
+	    
         // --- Event Listener หลัก (แก้ไขใหม่) ---
         pttButton.addEventListener('click', async () => {
             // ป้องกันการคลิกซ้ำซ้อน
@@ -192,11 +193,14 @@
                 // AudioContext ควรจะพร้อมแล้วจากการ init ครั้งแรก
                 if (audioContext.state === 'suspended') { await audioContext.resume(); }
 
-                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: MIC_SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true } });
                 
-                const source = audioContext.createMediaStreamSource(mediaStream);
-                const bufferSize = 4096;
-                scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+		// [แก้ไข] สร้าง AudioContext ใหม่สำหรับไมโครโฟน เพื่อให้ได้ Sample Rate ที่ถูกต้อง
+		// เราไม่สามารถเปลี่ยน sampleRate ของ audioContext เดิมที่ใช้เล่นเสียงได้
+		const micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: mediaStream.getAudioTracks()[0].getSettings().sampleRate });
+		const source = micAudioContext.createMediaStreamSource(mediaStream);
+		const bufferSize = 4096;
+		scriptProcessor = micAudioContext.createScriptProcessor(bufferSize, 1, 1);
                 
                 scriptProcessor.onaudioprocess = (event) => {
                     const inputData = event.inputBuffer.getChannelData(0);
@@ -216,6 +220,8 @@
 
             } catch (err) {
                 console.error('Error starting PTT:', err);
+		alert('ไม่สามารถเปิดไมโครโฟนได้: ' + err.message);
+		statusDiv.textContent = 'Error: No microphone access!';
                 statusDiv.textContent = 'Error: No microphone access!';
                 stopPtt(); // เรียก stopPtt เพื่อ cleanup และรีเซ็ตสถานะ
             }
