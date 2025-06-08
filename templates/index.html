@@ -52,6 +52,7 @@
         }
         #ptt-button:hover:not(:disabled) {
             transform: scale(1.05);
+			background-color: #2980b9;
         }
         #ptt-button.transmitting {
             background-color: #e74c3c;
@@ -95,7 +96,12 @@
         <div id="status">Connecting...</div>
         <div id="ptt-button" class="initialize" role="button">กดเพื่อเริ่ม<br>ระบบเสียง</div>
         <div class="volume-controls">
-            </div>
+            <label for="mic-volume">Mic Input Gain:</label>
+            <input type="range" id="mic-volume" min="0" max="100" value="80">
+
+            <label for="speaker-volume">Speaker Output:</label>
+            <input type="range" id="speaker-volume" min="0" max="100" value="85">
+        </div>
     </div>
 
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
